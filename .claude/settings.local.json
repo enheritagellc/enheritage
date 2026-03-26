@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(for dir:*)",
+      "Bash(do echo:*)",
+      "Read(//workspace/services/**)",
+      "Bash(done)",
+      "Bash(find /workspace/services/*/src -type f -name \"*.ts\")",
+      "Bash(find /workspace/services/*/app -type f -name \"*.py\")",
+      "Bash(wc:*)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(grep -r \"migrate\\\\|migration\\\\|knex\\\\|prisma\\\\|drizzle\\\\|flyway\\\\|liquibase\" /workspace/package.json /workspace/services/*/package.json)",
+      "Bash(find /workspace/services -name *.sql -o -name *.ts -path */migrations/*)",
+      "Bash(xargs -I {} ls -la {})"
+    ]
+  }
+}

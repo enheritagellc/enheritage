@@ -1,0 +1,30 @@
+{
+  "name": "@enheritage/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "lint": "eslint app --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@enheritage/types": "workspace:*",
+    "expo": "~51.0.0",
+    "expo-router": "^3.5.0",
+    "react": "18.2.0",
+    "react-native": "0.74.1",
+    "react-native-webrtc": "^118.0.0",
+    "zustand": "^4.5.0",
+    "axios": "^1.7.0",
+    "react-native-async-storage": "^1.23.0"
+  },
+  "devDependencies": {
+    "@enheritage/config": "workspace:*",
+    "@types/react": "~18.2.0",
+    "typescript": "^5.5.0",
+    "expo-status-bar": "~1.12.0"
+  }
+}

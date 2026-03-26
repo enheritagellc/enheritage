@@ -1,0 +1,32 @@
+name: Setup pnpm
+description: >
+  Sets up Node.js (version from .nvmrc), enables corepack, restores the pnpm
+  store cache, and runs pnpm install --frozen-lockfile.
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version-file: .nvmrc
+
+    - name: Enable corepack
+      shell: bash
+      run: corepack enable
+
+    - name: Get pnpm store path
+      shell: bash
+      run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+    - name: Cache pnpm store
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.STORE_PATH }}
+        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pnpm-store-
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

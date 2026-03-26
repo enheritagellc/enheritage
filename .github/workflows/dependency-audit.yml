@@ -1,0 +1,186 @@
+# Required secrets (set in repository or organisation settings):
+#   None required.  The GitHub token provided automatically by Actions is
+#   sufficient to open issues via actions/github-script.
+#
+# Optional secrets:
+#   SLACK_WEBHOOK_URL — not used in this workflow; listed for completeness.
+#
+# Schedule: every Monday at 08:00 UTC.
+# Can also be triggered manually via workflow_dispatch.
+
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write   # Required for actions/github-script to open issues
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Audit all Node.js / pnpm dependencies across the monorepo.
+  # Opens a GitHub issue when high or critical vulnerabilities are found.
+  # ---------------------------------------------------------------------------
+  audit-node:
+    name: Audit Node dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Run pnpm audit
+        id: audit
+        run: pnpm audit --audit-level=high
+        # Allow the step to fail so we can capture the output and create an
+        # issue rather than silently dropping the result.
+        continue-on-error: true
+
+      - name: Capture audit output
+        if: steps.audit.outcome == 'failure'
+        id: capture
+        run: |
+          OUTPUT=$(pnpm audit --audit-level=high 2>&1 || true)
+          # Escape content for use in the github-script body
+          echo "AUDIT_OUTPUT<<EOF_AUDIT" >> $GITHUB_ENV
+          echo "$OUTPUT" >> $GITHUB_ENV
+          echo "EOF_AUDIT" >> $GITHUB_ENV
+
+      - name: Create GitHub issue for Node vulnerabilities
+        if: steps.audit.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+            const body = [
+              '## pnpm dependency audit – high/critical vulnerabilities found',
+              '',
+              `**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
+              `**Date:** ${today}`,
+              '',
+              '### Audit output',
+              '```',
+              process.env.AUDIT_OUTPUT || '(no output captured)',
+              '```',
+              '',
+              '> This issue was opened automatically by the weekly dependency audit workflow.',
+              '> Please triage, update affected packages, and close this issue once resolved.',
+            ].join('\n');
+
+            // Check whether an open issue for this week's audit already exists
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,dependencies',
+            });
+
+            const title = `[Security] pnpm audit: high/critical vulnerabilities (${today})`;
+            const existing = issues.find(i => i.title === title);
+
+            if (existing) {
+              console.log(`Issue already exists: #${existing.number}`);
+            } else {
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security', 'dependencies'],
+              });
+              console.log(`Created issue #${issue.number}: ${issue.html_url}`);
+            }
+
+      - name: Fail workflow if vulnerabilities were found
+        if: steps.audit.outcome == 'failure'
+        run: exit 1
+
+  # ---------------------------------------------------------------------------
+  # Audit Python dependencies for each Python service using pip-audit.
+  # Each service runs in its own matrix leg so failures are isolated.
+  # ---------------------------------------------------------------------------
+  audit-python:
+    name: Audit Python dependencies (${{ matrix.service }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - transcription
+          - nlp-ner
+          - biography-gen
+          - photo-album
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python + uv
+        uses: ./.github/actions/setup-python-uv
+        with:
+          working-directory: services/${{ matrix.service }}
+
+      - name: Install pip-audit
+        working-directory: services/${{ matrix.service }}
+        run: uv pip install pip-audit
+
+      - name: Run pip-audit
+        id: pip-audit
+        working-directory: services/${{ matrix.service }}
+        run: uv run pip-audit --desc on
+        continue-on-error: true
+
+      - name: Create GitHub issue for Python vulnerabilities
+        if: steps.pip-audit.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().split('T')[0];
+            const service = '${{ matrix.service }}';
+            const title = `[Security] pip-audit: vulnerabilities in services/${service} (${today})`;
+
+            const body = [
+              `## pip-audit – vulnerabilities found in \`services/${service}\``,
+              '',
+              `**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
+              `**Service:** \`services/${service}\``,
+              `**Date:** ${today}`,
+              '',
+              'Please review the workflow run logs for the full pip-audit report,',
+              'update affected packages in the service\'s `pyproject.toml`, and close',
+              'this issue once resolved.',
+              '',
+              '> This issue was opened automatically by the weekly dependency audit workflow.',
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,dependencies',
+            });
+
+            const existing = issues.find(i => i.title === title);
+            if (existing) {
+              console.log(`Issue already exists: #${existing.number}`);
+            } else {
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security', 'dependencies'],
+              });
+              console.log(`Created issue #${issue.number}: ${issue.html_url}`);
+            }
+
+      - name: Fail workflow if vulnerabilities were found
+        if: steps.pip-audit.outcome == 'failure'
+        run: exit 1

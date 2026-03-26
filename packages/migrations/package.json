@@ -1,0 +1,20 @@
+{
+  "name": "@enheritage/migrations",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PostgreSQL schema migrations for Enheritage",
+  "type": "module",
+  "scripts": {
+    "migrate": "tsx src/migrate.ts up",
+    "migrate:down": "tsx src/migrate.ts down",
+    "migrate:status": "tsx src/migrate.ts status"
+  },
+  "dependencies": {
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

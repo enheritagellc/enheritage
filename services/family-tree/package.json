@@ -1,0 +1,30 @@
+{
+  "name": "@enheritage/family-tree",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Family tree management with GEDCOM 5.5.1 export",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@fastify/sensible": "^5.0.0",
+    "fastify": "^4.28.0",
+    "fastify-plugin": "^4.5.0",
+    "pg": "^8.12.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@enheritage/config": "workspace:*",
+    "@enheritage/types": "workspace:*",
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

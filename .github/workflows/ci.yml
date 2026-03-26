@@ -1,0 +1,225 @@
+# Required secrets (set in repository or organisation settings):
+#   AWS_DEPLOY_ROLE_ARN  — not used directly by this workflow; listed for completeness
+#
+# This workflow runs on every pull request targeting main and on every push to
+# main.  Jobs are parallelised where possible; test jobs wait for the
+# lint-and-typecheck gate to pass first.
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect which parts of the monorepo changed so downstream jobs can be
+  # skipped cheaply when nothing relevant changed.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      node_services: ${{ steps.filter.outputs.node_services }}
+      python_services: ${{ steps.filter.outputs.python_services }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      packages: ${{ steps.filter.outputs.packages }}
+      infra: ${{ steps.filter.outputs.infra }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            node_services:
+              - 'services/auth/**'
+              - 'services/interview/**'
+              - 'services/media-ingestion/**'
+              - 'services/enrichment/**'
+              - 'services/family-tree/**'
+              - 'services/keepsake-render/**'
+              - 'services/notification/**'
+              - 'services/vault/**'
+            python_services:
+              - 'services/transcription/**'
+              - 'services/nlp-ner/**'
+              - 'services/biography-gen/**'
+              - 'services/photo-album/**'
+            frontend:
+              - 'apps/web/**'
+              - 'apps/admin/**'
+              - 'apps/mobile/**'
+            packages:
+              - 'packages/**'
+            infra:
+              - 'infra/terraform/**'
+
+  # ---------------------------------------------------------------------------
+  # Lint and type-check the entire monorepo via Turborepo.  All other jobs that
+  # produce test/build artefacts depend on this gate passing first.
+  # ---------------------------------------------------------------------------
+  lint-and-typecheck:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Lint and type-check (turbo)
+        run: pnpm turbo run lint typecheck
+
+  # ---------------------------------------------------------------------------
+  # Run unit/integration tests for all Node.js services.
+  # Spins up Postgres 16 and Redis 7 as service containers.
+  # ---------------------------------------------------------------------------
+  test-node-services:
+    name: Test Node services
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: enheritage_test
+          POSTGRES_USER: enheritage
+          POSTGRES_PASSWORD: enheritage_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Run Node service tests (turbo)
+        env:
+          DATABASE_URL: postgresql://enheritage:enheritage_test_password@localhost:5432/enheritage_test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+        run: |
+          pnpm turbo run test \
+            --filter="./services/auth" \
+            --filter="./services/interview" \
+            --filter="./services/media-ingestion" \
+            --filter="./services/enrichment" \
+            --filter="./services/family-tree" \
+            --filter="./services/keepsake-render" \
+            --filter="./services/notification" \
+            --filter="./services/vault"
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-coverage-reports
+          path: |
+            services/auth/coverage/
+            services/interview/coverage/
+            services/media-ingestion/coverage/
+            services/enrichment/coverage/
+            services/family-tree/coverage/
+            services/keepsake-render/coverage/
+            services/notification/coverage/
+            services/vault/coverage/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Run pytest for each Python service in a matrix so failures are isolated.
+  # ---------------------------------------------------------------------------
+  test-python-services:
+    name: Test Python service (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - transcription
+          - nlp-ner
+          - biography-gen
+          - photo-album
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python + uv
+        uses: ./.github/actions/setup-python-uv
+        with:
+          working-directory: services/${{ matrix.service }}
+
+      - name: Run pytest
+        run: |
+          cd services/${{ matrix.service }}
+          uv run pytest tests/ -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Build all shared packages so package consumers get pre-built artefacts.
+  # Runs in parallel with the test jobs.
+  # ---------------------------------------------------------------------------
+  build-packages:
+    name: Build packages
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Build packages (turbo)
+        run: pnpm turbo run build --filter="./packages/*"
+
+  # ---------------------------------------------------------------------------
+  # Validate Terraform configuration without reaching out to any backend.
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    name: Terraform validate & fmt
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init (no backend)
+        run: terraform -chdir=infra/terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Terraform fmt check
+        run: terraform -chdir=infra/terraform fmt -check -recursive

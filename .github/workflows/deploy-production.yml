@@ -1,0 +1,170 @@
+# Required secrets (set in repository or organisation settings):
+#   AWS_DEPLOY_ROLE_ARN  — IAM role ARN for GitHub Actions OIDC federation.
+#                          The role must have ECS, ECR, and Terraform state
+#                          (S3 + DynamoDB) permissions for the production account.
+#   SLACK_WEBHOOK_URL    — (optional) Incoming webhook URL for deployment
+#                          notifications.
+#
+# This workflow is MANUAL ONLY (workflow_dispatch).  Two jobs run in sequence:
+#
+#   1. validate-confirm  — Aborts immediately if the operator did not type the
+#                          exact confirmation string "deploy-to-production".
+#   2. deploy-production — Requires approval from the `production` GitHub
+#                          Environment (configure at least 2 required reviewers
+#                          there) before proceeding.
+
+name: Deploy – Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Docker image tag to deploy (e.g. sha-abc1234 or 1.2.3)
+        required: true
+        type: string
+      confirm:
+        description: "Type exactly: deploy-to-production"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Guard: reject the run immediately if the operator did not type the
+  # confirmation string correctly.  This prevents accidental triggers.
+  # ---------------------------------------------------------------------------
+  validate-confirm:
+    name: Validate confirmation string
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm != 'deploy-to-production' }}
+    steps:
+      - name: Abort – confirmation string did not match
+        run: |
+          echo "::error::Confirmation string did not match. Expected: deploy-to-production"
+          echo "Received: '${{ github.event.inputs.confirm }}'"
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # Production deploy.  Requires the `production` GitHub Environment approval
+  # gate AND the validate-confirm job to have passed (or been skipped because
+  # the confirm string was correct).
+  # ---------------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    environment: production
+    # Run only when the confirmation was correct (validate-confirm job was
+    # skipped, meaning its `if` evaluated to false — i.e. the string matched).
+    needs: validate-confirm
+    if: always() && needs.validate-confirm.result != 'failure'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform 1.8.0
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.0"
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=infra/terraform init \
+            -var-file=environments/production.tfvars
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          terraform -chdir=infra/terraform plan \
+            -var-file=environments/production.tfvars \
+            -out=tfplan \
+            -detailed-exitcode
+        continue-on-error: true
+
+      - name: Upload Terraform plan artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-production-${{ github.run_id }}
+          path: infra/terraform/tfplan
+          retention-days: 30
+
+      - name: Fail if Terraform plan errored
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+      - name: Terraform apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: terraform -chdir=infra/terraform apply tfplan
+
+      - name: Force new ECS deployments
+        run: |
+          SERVICES=(
+            auth
+            interview
+            media-ingestion
+            enrichment
+            family-tree
+            keepsake-render
+            notification
+            vault
+            transcription
+            nlp-ner
+            biography-gen
+            photo-album
+          )
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "Triggering new deployment for: $SERVICE (tag: ${{ github.event.inputs.image_tag }})"
+            aws ecs update-service \
+              --cluster enheritage-production \
+              --service "$SERVICE" \
+              --force-new-deployment \
+              --no-cli-pager
+          done
+
+      - name: Wait for ECS services to stabilise
+        run: |
+          aws ecs wait services-stable \
+            --cluster enheritage-production \
+            --services \
+              auth \
+              interview \
+              media-ingestion \
+              enrichment \
+              family-tree \
+              keepsake-render \
+              notification \
+              vault \
+              transcription \
+              nlp-ner \
+              biography-gen \
+              photo-album
+
+      - name: Smoke test – health endpoint
+        run: curl -f https://api.enheritage.com/health || exit 1
+
+      - name: Notify Slack – success
+        if: success() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": ":rocket: *Production deploy succeeded* — tag `${{ github.event.inputs.image_tag }}` deployed to <https://api.enheritage.com|api.enheritage.com> by @${{ github.actor }}"
+            }'
+
+      - name: Notify Slack – failure
+        if: failure() && secrets.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "text": ":fire: *Production deploy FAILED* — tag `${{ github.event.inputs.image_tag }}` — triggered by @${{ github.actor }} — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+            }'

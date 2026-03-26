@@ -1,0 +1,20 @@
+environment        = "staging"
+aws_region         = "us-east-1"
+project_name       = "enheritage"
+vpc_cidr           = "10.0.0.0/16"
+availability_zones = ["us-east-1a", "us-east-1b"]
+
+auth0_issuer_url = "https://your-tenant.us.auth0.com/"
+auth0_audience   = "https://api.enheritage.com"
+
+allowed_origins = [
+  "https://app.enheritage.com",
+  "https://staging.enheritage.com"
+]
+
+rds_min_acu     = 0.5
+rds_max_acu     = 16
+redis_node_type = "cache.t4g.small"
+
+ecs_min_capacity = 1
+ecs_max_capacity = 4

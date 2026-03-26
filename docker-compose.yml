@@ -1,0 +1,472 @@
+version: "3.9"
+
+networks:
+  enheritage-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  localstack_data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: enheritage
+      POSTGRES_USER: enheritage
+      POSTGRES_PASSWORD: enheritage_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - enheritage-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enheritage -d enheritage"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - enheritage-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  localstack:
+    image: localstack/localstack:3.5
+    restart: unless-stopped
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3,sqs,kms,sns,ses,secretsmanager
+      DEFAULT_REGION: us-east-1
+      DEBUG: 0
+      PERSISTENCE: 1
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - enheritage-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:4566/_localstack/health | grep -q '\"s3\": \"available\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  localstack-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - enheritage-network
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+    entrypoint: /bin/sh
+    command: >
+      -c "
+        set -e
+        echo '--- Creating S3 buckets ---'
+        aws s3api create-bucket --bucket enheritage-media-dev
+        aws s3api create-bucket --bucket enheritage-processed-dev
+        aws s3api create-bucket --bucket enheritage-photos-dev
+        aws s3api create-bucket --bucket enheritage-renders-dev
+
+        echo '--- Creating SQS queues ---'
+        aws sqs create-queue --queue-name enheritage-transcription-dev
+        aws sqs create-queue --queue-name enheritage-ner-dev
+        aws sqs create-queue --queue-name enheritage-enrichment-dev
+        aws sqs create-queue --queue-name enheritage-biography-dev
+        aws sqs create-queue --queue-name enheritage-render-dev
+        aws sqs create-queue --queue-name enheritage-notification-dev
+
+        echo '--- Creating KMS key and alias ---'
+        KEY_ID=$$(aws kms create-key --description 'enheritage-dev-key' --query 'KeyMetadata.KeyId' --output text)
+        aws kms create-alias --alias-name alias/enheritage-dev --target-key-id $$KEY_ID
+
+        echo '--- LocalStack init complete ---'
+      "
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Database migrations (runs once on startup)
+  # ---------------------------------------------------------------------------
+
+  migrations:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./packages/migrations:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+    networks:
+      - enheritage-network
+    command: >
+      sh -c "npm install --silent && npx tsx src/migrate.ts up"
+    restart: on-failure
+
+  # ---------------------------------------------------------------------------
+  # Node.js services
+  # ---------------------------------------------------------------------------
+
+  auth:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      REDIS_URL: redis://redis:6379
+    networks:
+      - enheritage-network
+
+  interview:
+    build:
+      context: ./services/interview
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      REDIS_URL: redis://redis:6379
+    networks:
+      - enheritage-network
+
+  media-ingestion:
+    build:
+      context: ./services/media-ingestion
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3003:3000"
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+    networks:
+      - enheritage-network
+
+  enrichment:
+    build:
+      context: ./services/enrichment
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3004:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_MEDIA: enheritage-media-dev
+      SQS_ENRICHMENT_QUEUE_URL: http://localstack:4566/000000000000/enheritage-enrichment-dev
+      SQS_BIOGRAPHY_QUEUE_URL: http://localstack:4566/000000000000/enheritage-biography-dev
+      MAX_ENTITIES_PER_JOB: "50"
+      PROVIDER_CONCURRENCY: "5"
+      CACHE_TTL_SECONDS: "86400"
+    networks:
+      - enheritage-network
+
+  family-tree:
+    build:
+      context: ./services/family-tree
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3005:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_MEDIA: enheritage-media-dev
+    networks:
+      - enheritage-network
+
+  keepsake-render:
+    build:
+      context: ./services/keepsake-render
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3006:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_MEDIA: enheritage-media-dev
+      S3_BUCKET_RENDERS: enheritage-renders-dev
+      SQS_RENDER_QUEUE_URL: http://localstack:4566/000000000000/enheritage-render-dev
+      SQS_NOTIFICATION_QUEUE_URL: http://localstack:4566/000000000000/enheritage-notification-dev
+    networks:
+      - enheritage-network
+
+  notification:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3007:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      SQS_NOTIFICATION_QUEUE_URL: http://localstack:4566/000000000000/enheritage-notification-dev
+      SES_FROM_ADDRESS: noreply@enheritage.com
+      SES_FROM_NAME: Enheritage
+      SNS_SMS_ENABLED: "false"
+      DRY_RUN: "true"
+    networks:
+      - enheritage-network
+
+  vault:
+    build:
+      context: ./services/vault
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3008:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      KMS_KEY_ALIAS_PREFIX: alias/enheritage
+      S3_BUCKET_VAULT: enheritage-media-dev
+    networks:
+      - enheritage-network
+
+  # ---------------------------------------------------------------------------
+  # Python services
+  # ---------------------------------------------------------------------------
+
+  transcription:
+    build:
+      context: ./services/transcription
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      PORT: 8000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+    networks:
+      - enheritage-network
+
+  nlp-ner:
+    build:
+      context: ./services/nlp-ner
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      PORT: 8000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+    networks:
+      - enheritage-network
+
+  biography-gen:
+    build:
+      context: ./services/biography-gen
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
+    depends_on:
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      PORT: 8000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+    networks:
+      - enheritage-network
+
+  photo-album:
+    build:
+      context: ./services/photo-album
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8004:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      PORT: 8000
+      DATABASE_URL: postgres://enheritage:enheritage_dev@postgres:5432/enheritage
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_PHOTOS: enheritage-photos-dev
+    networks:
+      - enheritage-network
+
+  # ---------------------------------------------------------------------------
+  # Web app
+  # ---------------------------------------------------------------------------
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      NODE_ENV: development
+    command: pnpm dev --host
+    networks:
+      - enheritage-network

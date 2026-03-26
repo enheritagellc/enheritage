@@ -1,0 +1,102 @@
+# Required secrets (set in repository or organisation settings):
+#   AWS_DEPLOY_ROLE_ARN — IAM role ARN for GitHub Actions OIDC federation.
+#                         The role must have permission to push to each ECR
+#                         repository listed in the matrix below.
+#
+# This workflow triggers only on pushes to main.  Each service is built and
+# pushed in parallel via a matrix strategy.  GitHub Actions layer cache
+# (type=gha) is scoped per service so caches do not collide.
+
+name: Docker build & push
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write   # Required for OIDC token exchange with AWS
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build & push ${{ matrix.service }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: auth
+            context: ./services/auth
+            image: enheritage/auth
+          - service: interview
+            context: ./services/interview
+            image: enheritage/interview
+          - service: media-ingestion
+            context: ./services/media-ingestion
+            image: enheritage/media-ingestion
+          - service: enrichment
+            context: ./services/enrichment
+            image: enheritage/enrichment
+          - service: family-tree
+            context: ./services/family-tree
+            image: enheritage/family-tree
+          - service: keepsake-render
+            context: ./services/keepsake-render
+            image: enheritage/keepsake-render
+          - service: notification
+            context: ./services/notification
+            image: enheritage/notification
+          - service: vault
+            context: ./services/vault
+            image: enheritage/vault
+          - service: transcription
+            context: ./services/transcription
+            image: enheritage/transcription
+          - service: nlp-ner
+            context: ./services/nlp-ner
+            image: enheritage/nlp-ner
+          - service: biography-gen
+            context: ./services/biography-gen
+            image: enheritage/biography-gen
+          - service: photo-album
+            context: ./services/photo-album
+            image: enheritage/photo-album
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ matrix.image }}
+          tags: |
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
