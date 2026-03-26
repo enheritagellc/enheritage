@@ -457,8 +457,8 @@ services:
 
   web:
     build:
-      context: ./apps/web
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/web/Dockerfile
     restart: unless-stopped
     ports:
       - "5173:5173"
@@ -466,7 +466,6 @@ services:
       - path: .env.local
         required: false
     environment:
-      NODE_ENV: development
-    command: pnpm dev --host
+      NODE_ENV: production
     networks:
       - enheritage-network
