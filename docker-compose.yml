@@ -137,8 +137,8 @@ services:
 
   auth:
     build:
-      context: ./services/auth
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/auth/Dockerfile
     restart: unless-stopped
     ports:
       - "3001:3000"
@@ -160,8 +160,8 @@ services:
 
   interview:
     build:
-      context: ./services/interview
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/interview/Dockerfile
     restart: unless-stopped
     ports:
       - "3002:3000"
@@ -183,8 +183,8 @@ services:
 
   media-ingestion:
     build:
-      context: ./services/media-ingestion
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/media-ingestion/Dockerfile
     restart: unless-stopped
     ports:
       - "3003:3000"
@@ -206,8 +206,8 @@ services:
 
   enrichment:
     build:
-      context: ./services/enrichment
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/enrichment/Dockerfile
     restart: unless-stopped
     ports:
       - "3004:3000"
@@ -238,8 +238,8 @@ services:
 
   family-tree:
     build:
-      context: ./services/family-tree
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/family-tree/Dockerfile
     restart: unless-stopped
     ports:
       - "3005:3000"
@@ -326,8 +326,8 @@ services:
 
   vault:
     build:
-      context: ./services/vault
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/vault/Dockerfile
     restart: unless-stopped
     ports:
       - "3008:3000"

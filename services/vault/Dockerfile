@@ -1,23 +1,30 @@
 FROM node:20-alpine AS base
-WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@9 --activate
+WORKDIR /app
 
-FROM base AS deps
-COPY package.json ./
-RUN pnpm install --prod --ignore-scripts
+FROM base AS installer
+COPY package.json pnpm-workspace.yaml ./
+COPY packages/config/package.json ./packages/config/
+COPY packages/types/package.json ./packages/types/
+COPY packages/ui/package.json ./packages/ui/
+COPY services/vault/package.json ./services/vault/
+RUN echo "shamefully-hoist=true" > .npmrc && pnpm install --ignore-scripts
 
 FROM base AS builder
-COPY package.json ./
-RUN pnpm install --ignore-scripts
-COPY tsconfig.json ./
-COPY src ./src
+COPY --from=installer /app/node_modules ./node_modules
+COPY --from=installer /app/.npmrc ./.npmrc
+COPY packages/ ./packages/
+RUN cd packages/types && pnpm build
+COPY services/vault/ ./services/vault/
+WORKDIR /app/services/vault
 RUN pnpm build
 
-FROM base AS runner
+FROM node:20-alpine AS runner
+WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
-COPY package.json ./
+COPY --from=installer /app/node_modules ./node_modules
+COPY --from=builder /app/services/vault/dist ./dist
+COPY --from=builder /app/services/vault/package.json ./
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:3000/health || exit 1
